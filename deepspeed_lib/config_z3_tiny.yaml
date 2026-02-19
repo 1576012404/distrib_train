@@ -1,0 +1,21 @@
+compute_environment: LOCAL_MACHINE
+distributed_type: DEEPSPEED
+deepspeed_config:
+  gradient_accumulation_steps: 1
+  gradient_clipping: 1.0
+  offload_optimizer_device: none
+  offload_param_device: none
+  zero3_init_flag: true
+  zero3_save_16bit_model: true
+  zero_stage: 3
+  # === 关键修改：限制 ZeRO-3 的 Buffer 大小 ===
+  zero_optimization:
+    stage3_prefetch_bucket_size: 500000  # 默认是 5e7 (5000万)，这里改为 50万
+    stage3_param_persistence_threshold: 10000 # 只要参数超过这个数就切分
+    stage3_max_live_parameters: 10000000 # 限制同时存活的完整参数量
+    reduce_bucket_size: 500000          # 减小梯度通信桶
+    stage3_gather_16bit_weights_on_model_save: true
+mixed_precision: fp16
+num_machines: 1
+num_processes: 2
+use_cpu: false
