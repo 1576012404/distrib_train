@@ -87,8 +87,8 @@ def main():
     end_time = time.time()
 
     accelerator.wait_for_everyone()
-    mem_usage = torch.cuda.max_memory_allocated() / 1024 / 1024
-    print(f"GPU {accelerator.process_index} | Max Memory: {mem_usage:.2f} MB")
+    mem_usage = torch.cuda.max_memory_allocated() / 1024 / 1024/1024
+    print(f"GPU {accelerator.process_index} | Max Memory: {mem_usage:.2f} GB")
 
     if accelerator.is_main_process:
         print_rank0(f"Time: {end_time - start_time:.4f}s")
