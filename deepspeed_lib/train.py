@@ -5,26 +5,26 @@ from accelerate import Accelerator
 import time
 
 
-# 1. 定义一个“占显存”的假模型
-# 为了让T4显卡(16GB)能跑起来且能看到差异，我们定义一个中等规模的模型
+# === V2改动：大幅增加模型深度，压榨显存 ===
 class HeavyModel(nn.Module):
     def __init__(self):
         super().__init__()
-        # 定义几个大矩阵，模拟 GPT 类模型的参数量
-        # 4096 * 4096 * 4 bytes * 10 layers approx = 670MB parameters
-        # 加上梯度和优化器状态，显存会迅速上升
+        # 显存杀手：
+        # 之前的 12 层 -> 现在的 32 层
+        # 参数量翻了近 3 倍，梯度和优化器状态也会翻 3 倍
+        # 预计 DDP 模式下显存会飙升到 13GB - 15GB 甚至 OOM
         self.layers = nn.ModuleList([
-            nn.Linear(4096, 4096) for _ in range(12)
+            nn.Linear(4096, 4096) for _ in range(32)
         ])
         self.activation = nn.ReLU()
 
     def forward(self, x):
         for layer in self.layers:
+            # 使用 checkpointing (可选) 这里故意不用，为了撑爆显存
             x = self.activation(layer(x))
         return x
 
 
-# 2. 定义假数据集
 class RandomDataset(Dataset):
     def __init__(self, size=1000):
         self.size = size
@@ -38,56 +38,60 @@ class RandomDataset(Dataset):
 
 
 def main():
-    # 初始化 Accelerator
     accelerator = Accelerator()
 
-    # 强制同步打印，防止日志混乱
     def print_rank0(msg):
         if accelerator.is_main_process:
             print(f"[Main Process] {msg}")
 
-    print_rank0(">>> 初始化模型和数据...")
+    print_rank0(">>> [V2-压力测试] 初始化 32层 HeavyModel...")
 
     model = HeavyModel()
+    # 打印参数量
+    total_params = sum(p.numel() for p in model.parameters())
+    print_rank0(f"Total Parameters: {total_params / 1e6:.2f} M")
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     dataset = RandomDataset()
-    dataloader = DataLoader(dataset, batch_size=16)  # Batch size 较小以聚焦模型本身的显存
+    # Batch size 保持 16，主要靠模型参数撑显存
+    dataloader = DataLoader(dataset, batch_size=16)
 
-    # 关键步骤：使用 accelerator 接管对象
     model, optimizer, dataloader = accelerator.prepare(
         model, optimizer, dataloader
     )
 
     print_rank0(">>> 开始训练 Step...")
-
     model.train()
     start_time = time.time()
 
-    # 运行几个 step 即可
-    for i, batch in enumerate(dataloader):
-        optimizer.zero_grad()
-        output = model(batch)
-        loss = output.mean()
-        accelerator.backward(loss)
-        optimizer.step()
+    try:
+        # 跑 10 个 batch，让显存稳定下来
+        for i, batch in enumerate(dataloader):
+            optimizer.zero_grad()
+            output = model(batch)
+            loss = output.mean()
+            accelerator.backward(loss)
+            optimizer.step()
 
-        if i >= 5:  # 跑 5 个 batch 就够了
-            break
+            if i % 2 == 0:
+                print_rank0(f"Step {i} finished")
+
+            if i >= 10:
+                break
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            print(f"!!! GPU {accelerator.process_index} OOM (爆显存了) !!!")
+        else:
+            raise e
 
     end_time = time.time()
 
-    # 统计显存
-    # 等待所有进程到达此处
     accelerator.wait_for_everyone()
-
-    # 获取当前 GPU 的显存峰值 (MB)
     mem_usage = torch.cuda.max_memory_allocated() / 1024 / 1024
-
-    # 打印结果
-    print(f"GPU {accelerator.process_index} | Max Memory Allocated: {mem_usage:.2f} MB")
+    print(f"GPU {accelerator.process_index} | Max Memory: {mem_usage:.2f} MB")
 
     if accelerator.is_main_process:
-        print_rank0(f"Time taken for 5 steps: {end_time - start_time:.4f}s")
+        print_rank0(f"Time: {end_time - start_time:.4f}s")
         print_rank0(">>> 实验结束")
 
 
